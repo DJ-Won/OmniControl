@@ -1,7 +1,7 @@
 # This code is based on https://github.com/Mathux/ACTOR.git
 import torch
 import utils.rotation_conversions as geometry
-
+from copy import deepcopy
 
 from model.smpl import SMPL, JOINTSTYPE_ROOT
 # from .get_model import JOINTSTYPES
@@ -19,7 +19,8 @@ class Rotation2xyz:
                  glob_rot=None, get_rotations_back=False, **kwargs):
         if pose_rep == "xyz":
             return x
-
+        trans = None
+        rots = None
         if mask is None:
             mask = torch.ones((x.shape[0], x.shape[-1]), dtype=bool, device=x.device)
 
@@ -34,7 +35,8 @@ class Rotation2xyz:
             x_rotations = x[:, :-1]
         else:
             x_rotations = x
-
+        trans = deepcopy(x_translations)
+        rots = deepcopy(x_rotations)
         x_rotations = x_rotations.permute(0, 3, 1, 2)
         nsamples, time, njoints, feats = x_rotations.shape
 
@@ -89,4 +91,6 @@ class Rotation2xyz:
         if get_rotations_back:
             return x_xyz, rotations, global_orient
         else:
+            if rots is not None:
+                return x_xyz, rots, trans
             return x_xyz

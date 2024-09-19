@@ -5,6 +5,42 @@ from trimesh import Trimesh
 import os
 import torch
 from visualize.simplify_loc2rot import joints2smpl
+from scipy.spatial.transform import Rotation as R
+
+def rot6d_to_euler(poses):
+    # Step 1: 将6D旋转表示转换为旋转矩阵
+    def rot6d_to_rotmat(poses):
+        batch_size = poses.shape[0]
+        
+        # Split the 6D representation into two 3D vectors
+        x_raw = poses[:, 0:3]
+        y_raw = poses[:, 3:6]
+        
+        # Normalize x_raw to get the x-axis of the rotation matrix
+        x = x_raw / np.linalg.norm(x_raw, axis=1, keepdims=True)
+        
+        # Make y perpendicular to x
+        z = np.cross(x, y_raw)
+        z = z / np.linalg.norm(z, axis=1, keepdims=True)
+        
+        # Recompute y to ensure orthogonality
+        y = np.cross(z, x)
+        
+        # Stack x, y, z to form the rotation matrix
+        rot_mats = np.stack([x, y, z], axis=-1)
+        
+        return rot_mats  # shape: (batch_size, 3, 3)
+
+    # Step 2: 从旋转矩阵转换为欧拉角
+    rot_mats = rot6d_to_rotmat(poses)
+    
+    # 将旋转矩阵转为欧拉角（顺序可以是 'xyz', 'zyx' 等，取决于具体需求）
+    euler_angles = np.zeros((poses.shape[0], 3))  # Placeholder for the output
+    for i in range(poses.shape[0]):
+        r = R.from_matrix(rot_mats[i])
+        euler_angles[i] = r.as_euler('xyz', degrees=False)  # 返回弧度制的欧拉角
+    
+    return euler_angles
 
 class npy2obj:
     def __init__(self, npy_path, sample_idx, rep_idx, device=0, cuda=True):
@@ -23,7 +59,11 @@ class npy2obj:
         self.absl_idx = self.rep_idx*self.total_num_samples + self.sample_idx
         self.num_frames = self.motions['motion'][self.absl_idx].shape[-1]
         self.j2s = joints2smpl(num_frames=self.num_frames, device_id=device, cuda=cuda)
-        self.hint = self.motions['hint'][self.absl_idx]
+        self.hint = None
+        if self.motions['hint'] != []:
+            self.hint = self.motions['hint'][self.absl_idx]
+        self.rots = None
+        self.trans = None
 
         if self.nfeats == 3:
             print(f'Running SMPLify For sample [{sample_idx}], repetition [{rep_idx}], it may take a few minutes.')
@@ -34,11 +74,16 @@ class npy2obj:
         self.bs, self.njoints, self.nfeats, self.nframes = self.motions['motion'].shape
         self.real_num_frames = self.motions['lengths'][self.absl_idx]
 
-        self.vertices = self.rot2xyz(torch.tensor(self.motions['motion']), mask=None,
+        self.vertices, self.rots, self.trans = self.rot2xyz(torch.tensor(self.motions['motion']), mask=None,
                                      pose_rep='rot6d', translation=True, glob=True,
                                      jointstype='vertices',
                                      # jointstype='smpl',  # for joint locations
                                      vertstrans=False)
+        self.trans = self.trans[0].numpy().transpose(1,0)
+        _,joints,_,fnum = self.rots.shape
+        self.rots = self.rots[0].numpy().transpose(2,0,1).reshape(-1,6)
+        self.rots = rot6d_to_euler(self.rots)
+        self.rots = self.rots.reshape(fnum,-1)
         self.root_loc = self.motions['motion'][:, -1, :3, :].reshape(1, 1, 3, -1)
         self.vertices += self.root_loc
         # put one the floor y = 0
@@ -70,3 +115,17 @@ class npy2obj:
             'hint': self.hint,
         }
         np.save(save_path, data_dict)
+
+    def save_amass(self, save_path):
+        poses = np.zeros((self.real_num_frames,156))
+        poses[...,:72] = self.rots
+        trans = self.trans
+        data_dict = {
+            'poses': poses,
+            'trans': trans,
+            'betas': 0.0,
+            'mocap_framerate': 30,
+            'gender': 'neutral',
+        }
+        np.save(save_path, data_dict)
+        return data_dict
